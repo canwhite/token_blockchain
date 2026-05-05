@@ -3,68 +3,200 @@ package blockchain
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 )
 
-//type xxx struct创建class
+type DataType string
+
+const (
+	DataTypeNovel      DataType = "novel"
+	DataTypeUserCredit DataType = "user_credit"
+	DataTypeHistory    DataType = "credit_history"
+)
+
 type Block struct {
-	Index     int
-	Timestamp string
-	BPM       int   //我们自己的数据
-	Hash      string
-	PrevHash  string
+	Index    int      `json:"index"`
+	Time     string   `json:"time"`
+	DataType DataType `json:"dataType"`
+	Key      string   `json:"key"`
+	Value    string   `json:"value"`
+	Hash     string   `json:"hash"`
+	PrevHash string   `json:"prevHash"`
 }
 
 var Blockchain []Block
+var mu sync.RWMutex
 
-//输入拼接: Index + Timestamp + BPM + PrevHash
+var indexStore = make(map[string]string)
+
 func calculateHash(block Block) string {
-	//注意BPM是我们的信息
-	record := fmt.Sprint(block.Index) + block.Timestamp + fmt.Sprint(block.BPM) + block.PrevHash
-	//创建哈希器
+	record := fmt.Sprintf("%d%s%s%s%s", block.Index, block.Time, block.DataType, block.Key, block.Value)
 	h := sha256.New()
 	h.Write([]byte(record))
-	//输出字节，nil 表示"不需要追加到任何现有切片，直接给我哈希结果就行"。
-	//我可以不传nil，传进去一个切面，然后就会在切片后边拼接了是吧
-	hashed := h.Sum(nil)
-	//转化成字符串
-	return hex.EncodeToString(hashed)
+	return hex.EncodeToString(h.Sum(nil))
 }
 
-//==>返回值是个元组
-func GenerateBlock(oldBlock Block, BPM int) (Block, error) {
-	//直接定义，而不是短变量声明
-	var newBlock Block
-	//Now，返回的是一个结构体，fmt.Println(now.Format("2006-01-02 15:04:05"))中的2006-01-02 15:04:05，是语法规则
+func generateKey(dataType DataType, id string) string {
+	return fmt.Sprintf("%s:%s", dataType, id)
+}
+
+func GetLatestBlock() Block {
+	mu.RLock()
+	defer mu.RUnlock()
+	if len(Blockchain) == 0 {
+		return Block{}
+	}
+	return Blockchain[len(Blockchain)-1]
+}
+
+func Write(dataType DataType, key string, value string) (Block, error) {
+	mu.Lock()
+	defer mu.Unlock()
+
 	t := time.Now()
-	newBlock.Index = oldBlock.Index + 1
-	newBlock.Timestamp = t.String()
-	newBlock.BPM = BPM
-	newBlock.PrevHash = oldBlock.Hash
+	newBlock := Block{
+		Index:    len(Blockchain),
+		Time:     t.String(),
+		DataType: dataType,
+		Key:      key,
+		Value:    value,
+		PrevHash: GetLatestBlock().Hash,
+	}
 	newBlock.Hash = calculateHash(newBlock)
+
+	Blockchain = append(Blockchain, newBlock)
+	indexStore[key] = newBlock.Hash
+
 	return newBlock, nil
 }
 
-//判断block是否valid
+func Read(dataType DataType, key string) (string, error) {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	fullKey := generateKey(dataType, key)
+	for _, block := range Blockchain {
+		if block.DataType == dataType && block.Key == fullKey {
+			return block.Value, nil
+		}
+	}
+	return "", fmt.Errorf("not found: %s", fullKey)
+}
+
+func ReadAll(dataType DataType) ([]string, error) {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	var results []string
+	for _, block := range Blockchain {
+		if block.DataType == dataType {
+			results = append(results, block.Value)
+		}
+	}
+	return results, nil
+}
+
+func Delete(dataType DataType, key string) error {
+	mu.Lock()
+	defer mu.Unlock()
+
+	fullKey := generateKey(dataType, key)
+	for i, block := range Blockchain {
+		if block.DataType == dataType && block.Key == fullKey {
+			Blockchain = append(Blockchain[:i], Blockchain[i+1:]...)
+			reindexBlockchain()
+			return nil
+		}
+	}
+	return fmt.Errorf("not found: %s", fullKey)
+}
+
+func reindexBlockchain() {
+	indexStore = make(map[string]string)
+	for i := range Blockchain {
+		Blockchain[i].Index = i
+		if i > 0 {
+			Blockchain[i].PrevHash = Blockchain[i-1].Hash
+		}
+		Blockchain[i].Hash = calculateHash(Blockchain[i])
+		indexStore[Blockchain[i].Key] = Blockchain[i].Hash
+	}
+}
+
+func KeyExists(dataType DataType, key string) bool {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	fullKey := generateKey(dataType, key)
+	_, exists := indexStore[fullKey]
+	return exists
+}
+
 func IsBlockValid(newBlock Block, oldBlock Block) bool {
-	//断链了
 	if oldBlock.Index+1 != newBlock.Index {
 		return false
 	}
-	//前hash不对
 	if oldBlock.Hash != newBlock.PrevHash {
 		return false
 	}
-	//现hash不对
 	if calculateHash(newBlock) != newBlock.Hash {
 		return false
 	}
 	return true
 }
-//根据长度选择链
+
 func ReplaceChain(newBlocks []Block) {
+	mu.Lock()
+	defer mu.Unlock()
+
 	if len(newBlocks) > len(Blockchain) {
 		Blockchain = newBlocks
+		reindexBlockchain()
+	}
+}
+
+func GetAllKeys(dataType DataType) []string {
+	mu.RLock()
+	defer mu.RUnlock()
+
+	var keys []string
+	for _, block := range Blockchain {
+		if block.DataType == dataType {
+			keys = append(keys, block.Key)
+		}
+	}
+	return keys
+}
+
+func MarshalValue(v interface{}) (string, error) {
+	bytes, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return string(bytes), nil
+}
+
+func UnmarshalValue(value string, v interface{}) error {
+	return json.Unmarshal([]byte(value), v)
+}
+
+func init() {
+	if len(Blockchain) == 0 {
+		t := time.Now()
+		genesisBlock := Block{
+			Index:    0,
+			Time:     t.String(),
+			DataType: "genesis",
+			Key:      "genesis:block",
+			Value:    "{}",
+			Hash:     "",
+			PrevHash: "",
+		}
+		genesisBlock.Hash = calculateHash(genesisBlock)
+		Blockchain = append(Blockchain, genesisBlock)
+		indexStore[genesisBlock.Key] = genesisBlock.Hash
 	}
 }
