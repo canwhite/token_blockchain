@@ -2,13 +2,13 @@ package main
 
 import (
 	"encoding/json"
+	"github.com/davecgh/go-spew/spew"
+	"github.com/gin-gonic/gin"
+	"github.com/joho/godotenv"
 	"log"
 	"net/http"
 	"os"
 	"time"
-	"github.com/gin-gonic/gin"
-	"github.com/joho/godotenv"
-	"github.com/davecgh/go-spew/spew"
 	"token_blockchain/blockchain"
 )
 
@@ -63,12 +63,14 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	//goroutine
 	go func() {
-		t := time.Now()
-		genesisBlock := blockchain.Block{0, t.String(), 0, "", ""}
-		spew.Dump(genesisBlock)
-		blockchain.Blockchain = append(blockchain.Blockchain, genesisBlock)
+		if len(blockchain.Blockchain) == 0 {
+			t := time.Now()
+			genesisBlock := blockchain.Block{0, t.String(), 0, "", ""}
+			//格式化输出
+			spew.Dump(genesisBlock)
+			blockchain.Blockchain = append(blockchain.Blockchain, genesisBlock)
+		}
 	}()
 
 	log.Fatal(run())
