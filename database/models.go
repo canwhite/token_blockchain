@@ -1,7 +1,7 @@
 package database
 
 import "time"
-
+//bson:"xxx" 是 MongoDB Go 驱动用的字段标签。
 type Novel struct {
 	ID           string `json:"id" bson:"_id,omitempty"`
 	Author       string `json:"author,omitempty" bson:"author,omitempty"`
@@ -46,7 +46,7 @@ type User struct {
 	CreatedAt         string   `json:"createdAt,omitempty" bson:"createdAt,omitempty"`
 	UpdatedAt         string   `json:"updatedAt,omitempty" bson:"updatedAt,omitempty"`
 }
-
+//全局常量作为enum存在
 const (
 	HistoryTypeConsume  = "consume"
 	HistoryTypeRecharge = "recharge"

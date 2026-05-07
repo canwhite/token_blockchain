@@ -9,14 +9,16 @@ import (
 	"time"
 )
 
+//创建新的DataType类型
 type DataType string
 
+//多行const必须加()，如果只有单行可以不加
 const (
 	DataTypeNovel      DataType = "novel"
 	DataTypeUserCredit DataType = "user_credit"
 	DataTypeHistory    DataType = "credit_history"
 )
-
+//`json:xxx`是解析成什么样子，json的时候是这样，解包的时候是前者
 type Block struct {
 	Index    int      `json:"index"`
 	Time     string   `json:"time"`
@@ -27,9 +29,10 @@ type Block struct {
 	PrevHash string   `json:"prevHash"`
 }
 
+//全局变量
 var Blockchain []Block
 var mu sync.RWMutex
-
+//内存存储
 var indexStore = make(map[string]string)
 
 func calculateHash(block Block) string {
@@ -44,7 +47,9 @@ func generateKey(dataType DataType, id string) string {
 }
 
 func GetLatestBlock() Block {
+	//读锁
 	mu.RLock()
+	//go有很好用的defer，也可以理解为是为了防止内存未清理
 	defer mu.RUnlock()
 	if len(Blockchain) == 0 {
 		return Block{}
@@ -53,6 +58,7 @@ func GetLatestBlock() Block {
 }
 
 func Write(dataType DataType, key string, value string) (Block, error) {
+	//写锁
 	mu.Lock()
 	defer mu.Unlock()
 
@@ -68,12 +74,14 @@ func Write(dataType DataType, key string, value string) (Block, error) {
 	newBlock.Hash = calculateHash(newBlock)
 
 	Blockchain = append(Blockchain, newBlock)
+	//key=>hash存在本地的一个store
 	indexStore[key] = newBlock.Hash
 
 	return newBlock, nil
 }
 
 func Read(dataType DataType, key string) (string, error) {
+	//读锁
 	mu.RLock()
 	defer mu.RUnlock()
 

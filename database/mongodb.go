@@ -10,13 +10,13 @@ import (
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
-
+//全局变量
 var (
 	client   *mongo.Client
 	database *mongo.Database
 	mu       sync.RWMutex
 )
-
+//collectionNames，全局常量
 const (
 	CollectionNovels          = "novels"
 	CollectionUserCredits     = "user_credits"
@@ -24,11 +24,11 @@ const (
 	CollectionUsers           = "users"
 	CollectionRechargeRecords = "recharge_records"
 )
-
+//初始化mongodb
 func InitMongoDB(uri, dbName string) error {
 	mu.Lock()
 	defer mu.Unlock()
-
+	//解决内存未释放的问题
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
