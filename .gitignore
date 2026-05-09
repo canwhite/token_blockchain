@@ -12,7 +12,7 @@ coverage.txt
 pprof/
 
 vendor/
-
+security
 .idea/
 .vscode/
 *.swp

@@ -2,12 +2,15 @@ package api
 
 import (
 	"errors"
+	"log"
 	"net/http"
 	"strconv"
 
 	"github.com/gin-gonic/gin"
 	"token_blockchain/database"
+	"token_blockchain/middleware"
 	"token_blockchain/service"
+	"token_blockchain/utils"
 )
 
 type Server struct {
@@ -16,6 +19,10 @@ type Server struct {
 }
 
 func NewServer() *Server {
+	if err := utils.InitRSACrypto(); err != nil {
+		log.Printf("警告: RSA加密解密器初始化失败: %v", err)
+	}
+
 	return &Server{
 		novelService: service.NewNovelService(),
 		userService:  service.NewUserService(),
@@ -31,20 +38,30 @@ func (s *Server) RegisterRoutes(r *gin.Engine) {
 		{
 			novels.GET("", s.getAllNovels)
 			novels.GET("/:id", s.getNovel)
-			novels.POST("", s.createNovel)
-			novels.PUT("/:id", s.updateNovel)
 			novels.DELETE("/:id", s.deleteNovel)
+
+			encryptedNovels := novels.Group("")
+			encryptedNovels.Use(middleware.RSARequestMiddleware())
+			{
+				encryptedNovels.POST("", s.createNovel)
+				encryptedNovels.PUT("/:id", s.updateNovel)
+			}
 		}
 
 		users := api.Group("/users")
 		{
 			users.GET("", s.getAllUserCredits)
 			users.GET("/:id", s.getUserCredit)
-			users.POST("", s.createUserCredit)
-			users.PUT("/:id", s.updateUserCredit)
 			users.DELETE("/:id", s.deleteUserCredit)
 			users.POST("/recharge", s.rechargeUserTokens)
-			users.POST("/:id/consume-token", s.consumeUserToken)
+
+			encryptedUsers := users.Group("")
+			encryptedUsers.Use(middleware.RSARequestMiddleware())
+			{
+				encryptedUsers.POST("", s.createUserCredit)
+				encryptedUsers.PUT("/:id", s.updateUserCredit)
+				encryptedUsers.POST("/:id/consume-token", s.consumeUserToken)
+			}
 		}
 	}
 }
