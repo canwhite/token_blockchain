@@ -35,7 +35,7 @@ func (s *NovelService) CreateNovel(novel *database.Novel) error {
 		return fmt.Errorf("failed to emit event: %w", err)
 	}
 
-	if err := database.CreateNovel(novel); err != nil {
+	if err := database.UpsertNovel(novel); err != nil {
 		return fmt.Errorf("failed to save novel to MongoDB: %w", err)
 	}
 

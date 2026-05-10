@@ -93,11 +93,17 @@ func (s *Server) getNovel(c *gin.Context) {
 }
 
 func (s *Server) createNovel(c *gin.Context) {
+	log.Printf("[createNovel] Content-Length: %d", c.Request.ContentLength)
+
 	var novel database.Novel
 	if err := c.ShouldBindJSON(&novel); err != nil {
+		log.Printf("[createNovel] bind error: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+
+	log.Printf("[createNovel] parsed: id=%s, author=%s, chars_len=%d, items_len=%d",
+		novel.ID, novel.Author, len(novel.Characters), len(novel.Items))
 
 	if err := s.novelService.CreateNovel(&novel); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})

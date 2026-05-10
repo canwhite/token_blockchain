@@ -303,7 +303,7 @@ func UpsertNovel(novel *Novel) error {
 	opts := options.Update().SetUpsert(true)
 	_, err := GetNovelsCollection().UpdateOne(
 		ctx,
-		bson.M{"id": novel.ID},
+		bson.M{"_id": novel.ID},
 		bson.M{"$set": novel},
 		opts,
 	)
