@@ -14,6 +14,7 @@ import (
 func main() {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.Default()
+	router.MaxMultipartMemory = 100 << 20 // 100MB
 
 	server := api.NewServer()
 	server.RegisterRoutes(router)

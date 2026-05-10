@@ -30,6 +30,9 @@ func NewServer() *Server {
 }
 
 func (s *Server) RegisterRoutes(r *gin.Engine) {
+	debounce := middleware.NewDebounceMiddleware()
+	r.Use(debounce.Debounce())
+
 	r.GET("/health", s.healthCheck)
 
 	api := r.Group("/api/v1")
