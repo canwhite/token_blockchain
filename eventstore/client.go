@@ -105,6 +105,7 @@ func (s *EventService) AppendEvent(ctx context.Context, streamName string, strea
 	}
 
 	// Notify subscribers asynchronously
+	// emit and then notify subscription
 	go s.notifySubscribers(streamName, eventData)
 
 	return nil
