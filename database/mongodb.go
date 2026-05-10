@@ -3,19 +3,49 @@ package database
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
+	"strconv"
 	"sync"
 	"time"
 
+	"github.com/joho/godotenv"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
-//全局变量
-var (
+
+type MongoDBConfig struct {
+	URI            string
+	Database       string
+	Timeout        time.Duration
+	MaxPoolSize    uint64
+	MinPoolSize    uint64
+	MaxConnIdleTTL time.Duration
+}
+
+func DefaultMongoDBConfig() *MongoDBConfig {
+	return &MongoDBConfig{
+		URI:            "mongodb://localhost:27017",
+		Database:       "token_blockchain",
+		Timeout:        10 * time.Second,
+		MaxPoolSize:    10,
+		MinPoolSize:    2,
+		MaxConnIdleTTL: 30 * time.Minute,
+	}
+}
+
+type MongoDBInstance struct {
 	client   *mongo.Client
 	database *mongo.Database
+	config   *MongoDBConfig
 	mu       sync.RWMutex
+}
+
+var (
+	mongoInstance *MongoDBInstance
+	mongoOnce     sync.Once
 )
 //collectionNames，全局常量
 const (
@@ -26,57 +56,183 @@ const (
 	CollectionRechargeRecords = "recharge_records"
 	CollectionEvents          = "events"
 )
-//初始化mongodb
-func InitMongoDB(uri, dbName string) error {
-	mu.Lock()
-	defer mu.Unlock()
-	//解决内存未释放的问题
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+func loadMongoConfig() *MongoDBConfig {
+	if err := godotenv.Load(); err != nil {
+		log.Printf("未找到 .env 文件，使用系统环境变量: %v", err)
+	}
+
+	config := DefaultMongoDBConfig()
+
+	if uri := os.Getenv("MONGODB_URI"); uri != "" {
+		config.URI = uri
+	}
+
+	if database := os.Getenv("MONGODB_DATABASE"); database != "" {
+		config.Database = database
+	}
+
+	if timeout := os.Getenv("MONGODB_TIMEOUT"); timeout != "" {
+		if duration, err := time.ParseDuration(timeout); err == nil {
+			config.Timeout = duration
+		}
+	}
+
+	if maxPool := os.Getenv("MONGODB_MAX_POOL_SIZE"); maxPool != "" {
+		if size, err := strconv.ParseUint(maxPool, 10, 64); err == nil {
+			config.MaxPoolSize = size
+		}
+	}
+
+	if minPool := os.Getenv("MONGODB_MIN_POOL_SIZE"); minPool != "" {
+		if size, err := strconv.ParseUint(minPool, 10, 64); err == nil {
+			config.MinPoolSize = size
+		}
+	}
+
+	if idleTTL := os.Getenv("MONGODB_MAX_CONN_IDLE_TTL"); idleTTL != "" {
+		if duration, err := time.ParseDuration(idleTTL); err == nil {
+			config.MaxConnIdleTTL = duration
+		}
+	}
+
+	return config
+}
+
+func GetMongoInstance() *MongoDBInstance {
+	mongoOnce.Do(func() {
+		config := loadMongoConfig()
+
+		mongoInstance = &MongoDBInstance{
+			config: config,
+		}
+
+		if err := mongoInstance.Connect(); err != nil {
+			log.Fatalf("MongoDB自动连接失败: %v", err)
+		}
+
+		log.Printf("MongoDB自动连接成功! 数据库: %s", config.Database)
+	})
+	return mongoInstance
+}
+
+func (m *MongoDBInstance) Connect() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.client != nil {
+		return nil
+	}
+
+	clientOptions := options.Client().ApplyURI(m.config.URI)
+	clientOptions.SetMaxPoolSize(m.config.MaxPoolSize)
+	clientOptions.SetMinPoolSize(m.config.MinPoolSize)
+	clientOptions.SetMaxConnIdleTime(m.config.MaxConnIdleTTL)
+	clientOptions.SetConnectTimeout(m.config.Timeout)
+	clientOptions.SetServerSelectionTimeout(m.config.Timeout)
+
+	ctx, cancel := context.WithTimeout(context.Background(), m.config.Timeout)
 	defer cancel()
 
-	var err error
-	clientOptions := options.Client().ApplyURI(uri)
-	client, err = mongo.Connect(ctx, clientOptions)
+	client, err := mongo.Connect(ctx, clientOptions)
 	if err != nil {
-		return fmt.Errorf("failed to connect to MongoDB: %w", err)
+		return fmt.Errorf("连接MongoDB失败: %v", err)
 	}
 
-	if err = client.Ping(ctx, nil); err != nil {
-		return fmt.Errorf("failed to ping MongoDB: %w", err)
+	err = client.Ping(ctx, nil)
+	if err != nil {
+		return fmt.Errorf("MongoDB连接测试失败: %v", err)
 	}
 
-	database = client.Database(dbName)
+	m.client = client
+	m.database = client.Database(m.config.Database)
+
+	log.Printf("MongoDB连接成功! 数据库: %s", m.config.Database)
 	return nil
+}
+
+func (m *MongoDBInstance) Disconnect() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	if m.client == nil {
+		return nil
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), m.config.Timeout)
+	defer cancel()
+
+	err := m.client.Disconnect(ctx)
+	if err != nil {
+		return fmt.Errorf("断开MongoDB连接失败: %v", err)
+	}
+
+	m.client = nil
+	m.database = nil
+	log.Println("MongoDB连接已断开")
+	return nil
+}
+
+func (m *MongoDBInstance) GetClient() *mongo.Client {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.client == nil {
+		log.Fatal("MongoDB未初始化，请先调用Connect()")
+	}
+	return m.client
+}
+
+func (m *MongoDBInstance) GetDatabase() *mongo.Database {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.database == nil {
+		log.Fatal("MongoDB数据库未初始化，请先调用Connect()")
+	}
+	return m.database
+}
+
+func (m *MongoDBInstance) GetCollection(name string) *mongo.Collection {
+	return m.GetDatabase().Collection(name)
+}
+
+func (m *MongoDBInstance) IsConnected() bool {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+
+	if m.client == nil {
+		return false
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := m.client.Ping(ctx, nil)
+	return err == nil
+}
+
+func (m *MongoDBInstance) Close() error {
+	return m.Disconnect()
 }
 
 func GetMongoDB() *mongo.Database {
-	mu.RLock()
-	defer mu.RUnlock()
-	return database
+	return GetMongoInstance().GetDatabase()
 }
 
 func CloseMongoDB() error {
-	mu.Lock()
-	defer mu.Unlock()
-
-	if client != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		return client.Disconnect(ctx)
-	}
-	return nil
+	return GetMongoInstance().Close()
 }
 
 func GetNovelsCollection() *mongo.Collection {
-	return GetMongoDB().Collection(CollectionNovels)
+	return GetMongoInstance().GetCollection(CollectionNovels)
 }
 
 func GetUserCreditsCollection() *mongo.Collection {
-	return GetMongoDB().Collection(CollectionUserCredits)
+	return GetMongoInstance().GetCollection(CollectionUserCredits)
 }
 
 func GetCreditHistoriesCollection() *mongo.Collection {
-	return GetMongoDB().Collection(CollectionCreditHistories)
+	return GetMongoInstance().GetCollection(CollectionCreditHistories)
 }
 
 func CreateNovel(novel *Novel) error {
@@ -264,7 +420,7 @@ func DeleteCreditHistoriesByUser(userId string) error {
 }
 
 func GetUsersCollection() *mongo.Collection {
-	return GetMongoDB().Collection(CollectionUsers)
+	return GetMongoInstance().GetCollection(CollectionUsers)
 }
 
 func CreateUser(user *User) error {
@@ -355,7 +511,7 @@ func UpsertUser(user *User) error {
 }
 
 func GetRechargeRecordsCollection() *mongo.Collection {
-	return GetMongoDB().Collection(CollectionRechargeRecords)
+	return GetMongoInstance().GetCollection(CollectionRechargeRecords)
 }
 
 func CreateRechargeRecord(record *RechargeRecord) error {
@@ -407,9 +563,8 @@ func UpsertRechargeRecord(record *RechargeRecord) error {
 	return err
 }
 
-// GetEventsCollection returns the events collection
 func GetEventsCollection() *mongo.Collection {
-	return GetMongoDB().Collection(CollectionEvents)
+	return GetMongoInstance().GetCollection(CollectionEvents)
 }
 
 // CreateEvent saves an event to MongoDB

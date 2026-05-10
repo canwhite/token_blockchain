@@ -239,7 +239,7 @@ func (s *Server) rechargeUserTokens(c *gin.Context) {
 }
 
 type ConsumeRequest struct {
-	Amount      int    `json:"amount" binding:"required"`
+	Amount      int    `json:"amount"`
 	NovelID     string `json:"novelId"`
 	Description string `json:"description"`
 }
@@ -247,9 +247,17 @@ type ConsumeRequest struct {
 func (s *Server) consumeUserToken(c *gin.Context) {
 	userId := c.Param("id")
 	var req ConsumeRequest
-	if err := c.ShouldBindJSON(&req); err != nil {
-		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
-		return
+	req.Amount = 1
+
+	if c.Request.ContentLength > 0 {
+		if err := c.ShouldBindJSON(&req); err != nil {
+			log.Printf("[consumeUserToken] bind error: %v, userId: %s, body: %v", err, userId, c.Request.Body)
+			c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+			return
+		}
+		if req.Amount <= 0 {
+			req.Amount = 1
+		}
 	}
 
 	uc, err := s.userService.Consume(userId, req.Amount, req.NovelID, req.Description)
