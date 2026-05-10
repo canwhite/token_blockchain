@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/bson/primitive"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
 )
@@ -23,6 +24,7 @@ const (
 	CollectionCreditHistories = "credit_histories"
 	CollectionUsers           = "users"
 	CollectionRechargeRecords = "recharge_records"
+	CollectionEvents          = "events"
 )
 //初始化mongodb
 func InitMongoDB(uri, dbName string) error {
@@ -403,4 +405,164 @@ func UpsertRechargeRecord(record *RechargeRecord) error {
 		opts,
 	)
 	return err
+}
+
+// GetEventsCollection returns the events collection
+func GetEventsCollection() *mongo.Collection {
+	return GetMongoDB().Collection(CollectionEvents)
+}
+
+// CreateEvent saves an event to MongoDB
+func CreateEvent(ctx context.Context, doc *EventDocument) error {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	_, err := GetEventsCollection().InsertOne(ctx, doc)
+	return err
+}
+
+// GetEventsByStream returns all events for a stream
+func GetEventsByStream(streamName, streamID string) ([]*EventDocument, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	filter := bson.M{
+		"streamName": streamName,
+		"streamId":   streamID,
+	}
+
+	cursor, err := GetEventsCollection().Find(ctx, filter, options.Find().SetSort(bson.D{{Key: "version", Value: 1}}))
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var events []*EventDocument
+	if err := cursor.All(ctx, &events); err != nil {
+		return nil, err
+	}
+	return events, nil
+}
+
+// GetLatestEvent returns the latest event for a stream
+func GetLatestEvent(streamName, streamID string) (*EventDocument, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	filter := bson.M{
+		"streamName": streamName,
+		"streamId":   streamID,
+	}
+
+	var event EventDocument
+	err := GetEventsCollection().FindOne(ctx, filter, options.FindOne().SetSort(bson.D{{Key: "version", Value: -1}})).Decode(&event)
+	if err != nil {
+		return nil, err
+	}
+	return &event, nil
+}
+
+// GetLatestEventsByStream returns the latest event for each stream ID in a stream
+func GetLatestEventsByStream(streamName string) ([]*EventDocument, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	// Aggregation pipeline to get latest event per stream ID
+	pipeline := []bson.M{
+		{"$match": bson.M{"streamName": streamName}},
+		{"$sort": bson.D{{Key: "version", Value: -1}}},
+		{"$group": bson.M{
+			"_id":        "$streamId",
+			"id":         bson.M{"$first": "$_id"},
+			"type":       bson.M{"$first": "$type"},
+			"streamName": bson.M{"$first": "$streamName"},
+			"streamId":   bson.M{"$first": "$streamId"},
+			"data":       bson.M{"$first": "$data"},
+			"version":   bson.M{"$first": "$version"},
+			"createdAt": bson.M{"$first": "$createdAt"},
+		}},
+	}
+
+	cursor, err := GetEventsCollection().Aggregate(ctx, pipeline)
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	var results []bson.M
+	if err := cursor.All(ctx, &results); err != nil {
+		return nil, err
+	}
+
+	events := make([]*EventDocument, 0, len(results))
+	for _, r := range results {
+		events = append(events, &EventDocument{
+			ID:         getStringFromBson(r, "id"),
+			Type:       getStringFromBson(r, "type"),
+			StreamName: getStringFromBson(r, "streamName"),
+			StreamID:   getStringFromBson(r, "streamId"),
+			Data:       getBytesFromBson(r, "data"),
+			Version:    getInt64FromBson(r, "version"),
+			CreatedAt:  getTimeFromBson(r, "createdAt"),
+		})
+	}
+
+	return events, nil
+}
+
+// CountEvents returns the count of events for a stream
+func CountEvents(streamName, streamID string) (int, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	filter := bson.M{
+		"streamName": streamName,
+		"streamId":   streamID,
+	}
+
+	count, err := GetEventsCollection().CountDocuments(ctx, filter)
+	if err != nil {
+		return 0, err
+	}
+	return int(count), nil
+}
+
+// Helper functions for bson
+func getStringFromBson(m bson.M, key string) string {
+	if v, ok := m[key]; ok {
+		if s, ok := v.(string); ok {
+			return s
+		}
+	}
+	return ""
+}
+
+func getBytesFromBson(m bson.M, key string) []byte {
+	if v, ok := m[key]; ok {
+		if b, ok := v.(primitive.Binary); ok {
+			return b.Data
+		}
+	}
+	return nil
+}
+
+func getInt64FromBson(m bson.M, key string) int64 {
+	if v, ok := m[key]; ok {
+		switch val := v.(type) {
+		case int64:
+			return val
+		case int:
+			return int64(val)
+		}
+	}
+	return 0
+}
+
+func getTimeFromBson(m bson.M, key string) time.Time {
+	if v, ok := m[key]; ok {
+		if t, ok := v.(time.Time); ok {
+			return t
+		}
+	}
+	return time.Time{}
 }

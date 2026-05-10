@@ -1,19 +1,25 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
 	"token_blockchain/database"
+	"token_blockchain/eventstore"
 )
 
+var ErrNovelNotFound = errors.New("novel not found")
+
 type NovelService struct {
-	ccService *ChaincodeService
+	eventSvc *eventstore.EventService
 }
 
 func NewNovelService() *NovelService {
 	return &NovelService{
-		ccService: NewChaincodeService(),
+		eventSvc: eventstore.NewEventService(),
 	}
 }
 
@@ -22,13 +28,18 @@ func (s *NovelService) CreateNovel(novel *database.Novel) error {
 		novel.ID = uuid.New().String()
 	}
 
-	if err := s.ccService.SaveNovel(novel); err != nil {
-		return fmt.Errorf("failed to save novel to blockchain: %w", err)
+	ctx := context.Background()
+
+	// Emit event
+	err := s.eventSvc.AppendEvent(ctx, eventstore.StreamNovel, novel.ID, eventstore.EventNovelCreated, novel)
+	if err != nil {
+		return fmt.Errorf("failed to emit event: %w", err)
 	}
 
-	if s.ccService.IsMongoDBConnected() {
+	// Save to MongoDB
+	if database.GetMongoDB() != nil {
 		if err := database.CreateNovel(novel); err != nil {
-			return fmt.Errorf("failed to sync novel to MongoDB: %w", err)
+			return fmt.Errorf("failed to save novel to MongoDB: %w", err)
 		}
 	}
 
@@ -36,57 +47,81 @@ func (s *NovelService) CreateNovel(novel *database.Novel) error {
 }
 
 func (s *NovelService) GetNovel(id string) (*database.Novel, error) {
-	if s.ccService.IsMongoDBConnected() {
+	ctx := context.Background()
+
+	// Try MongoDB first
+	if database.GetMongoDB() != nil {
 		novel, err := database.GetNovel(id)
 		if err == nil {
 			return novel, nil
 		}
 	}
 
-	novel, err := s.ccService.GetNovel(id)
+	// Fallback to event store
+	state, err := s.eventSvc.GetLatestState(ctx, eventstore.StreamNovel, id)
 	if err != nil {
-		return nil, fmt.Errorf("novel not found: %s", id)
+		return nil, ErrNovelNotFound
 	}
 
-	if s.ccService.IsMongoDBConnected() {
-		database.UpsertNovel(novel)
+	data, err := json.Marshal(state)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	return novel, nil
+	var novel database.Novel
+	if err := json.Unmarshal(data, &novel); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal novel: %w", err)
+	}
+
+	return &novel, nil
 }
 
 func (s *NovelService) GetAllNovels() ([]*database.Novel, error) {
-	if s.ccService.IsMongoDBConnected() {
+	ctx := context.Background()
+
+	// Try MongoDB first
+	if database.GetMongoDB() != nil {
 		novels, err := database.GetAllNovels()
 		if err == nil && len(novels) > 0 {
 			return novels, nil
 		}
 	}
 
-	novels, err := s.ccService.GetAllNovels()
+	// Fallback to event store
+	states, err := s.eventSvc.GetAllLatestStates(ctx, eventstore.StreamNovel)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get novels: %w", err)
+		return nil, fmt.Errorf("failed to get all novels: %w", err)
 	}
 
-	if s.ccService.IsMongoDBConnected() {
-		for _, novel := range novels {
-			database.UpsertNovel(novel)
+	results := make([]*database.Novel, 0, len(states))
+	for _, state := range states {
+		data, err := json.Marshal(state)
+		if err != nil {
+			continue
+		}
+		var novel database.Novel
+		if err := json.Unmarshal(data, &novel); err == nil {
+			results = append(results, &novel)
 		}
 	}
 
-	return novels, nil
+	return results, nil
 }
 
 func (s *NovelService) UpdateNovel(id string, novel *database.Novel) error {
 	novel.ID = id
+	ctx := context.Background()
 
-	if err := s.ccService.SaveNovel(novel); err != nil {
-		return fmt.Errorf("failed to update novel in blockchain: %w", err)
+	// Emit event
+	err := s.eventSvc.AppendEvent(ctx, eventstore.StreamNovel, id, eventstore.EventNovelUpdated, novel)
+	if err != nil {
+		return fmt.Errorf("failed to emit event: %w", err)
 	}
 
-	if s.ccService.IsMongoDBConnected() {
+	// Update in MongoDB
+	if database.GetMongoDB() != nil {
 		if err := database.UpdateNovel(id, novel); err != nil {
-			return fmt.Errorf("failed to sync novel to MongoDB: %w", err)
+			return fmt.Errorf("failed to update novel in MongoDB: %w", err)
 		}
 	}
 
@@ -94,11 +129,17 @@ func (s *NovelService) UpdateNovel(id string, novel *database.Novel) error {
 }
 
 func (s *NovelService) DeleteNovel(id string) error {
-	if err := s.ccService.DeleteNovel(id); err != nil {
-		return fmt.Errorf("failed to delete novel from blockchain: %w", err)
+	ctx := context.Background()
+
+	// Emit deletion event
+	data := map[string]string{"id": id, "deleted": "true"}
+	err := s.eventSvc.AppendEvent(ctx, eventstore.StreamNovel, id, eventstore.EventNovelDeleted, data)
+	if err != nil {
+		return fmt.Errorf("failed to emit delete event: %w", err)
 	}
 
-	if s.ccService.IsMongoDBConnected() {
+	// Delete from MongoDB
+	if database.GetMongoDB() != nil {
 		if err := database.DeleteNovel(id); err != nil {
 			return fmt.Errorf("failed to delete novel from MongoDB: %w", err)
 		}

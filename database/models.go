@@ -73,3 +73,14 @@ type RechargeRecord struct {
 func Now() string {
 	return time.Now().Format(time.RFC3339)
 }
+
+// EventDocument represents an event stored in MongoDB
+type EventDocument struct {
+	ID        string    `json:"id" bson:"_id"`
+	Type      string    `json:"type" bson:"type"`
+	StreamName string   `json:"streamName" bson:"streamName"`
+	StreamID  string    `json:"streamId" bson:"streamId"`
+	Data      []byte    `json:"data" bson:"data"`
+	Version   int64     `json:"version" bson:"version"`
+	CreatedAt time.Time `json:"createdAt" bson:"createdAt"`
+}

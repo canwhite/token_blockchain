@@ -1,127 +1,178 @@
 package service
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
 	"token_blockchain/database"
+	"token_blockchain/eventstore"
 )
 
 var ErrInsufficientCredit = errors.New("insufficient credit")
 var ErrUserNotFound = errors.New("user not found")
 
 type UserService struct {
-	ccService *ChaincodeService
+	eventSvc *eventstore.EventService
 }
 
 func NewUserService() *UserService {
 	return &UserService{
-		ccService: NewChaincodeService(),
+		eventSvc: eventstore.NewEventService(),
 	}
 }
 
+// CreateUserCredit creates a new user credit record
 func (s *UserService) CreateUserCredit(uc *database.UserCredit) error {
 	if uc.UserID == "" {
 		return errors.New("userId is required")
 	}
 
-	if err := s.ccService.SaveUserCredit(uc); err != nil {
-		return fmt.Errorf("failed to save user credit to blockchain: %w", err)
+	// Use existing ID or generate new one
+	if uc.ID == "" {
+		uc.ID = uuid.New().String()
 	}
 
-	if s.ccService.IsMongoDBConnected() {
+	ctx := context.Background()
+
+	// Emit event for state change
+	err := s.eventSvc.AppendEvent(ctx, eventstore.StreamUserCredit, uc.UserID, eventstore.EventUserCreditCreated, uc)
+	if err != nil {
+		return fmt.Errorf("failed to emit event: %w", err)
+	}
+
+	// Also save to MongoDB as current state (for fast reads)
+	if database.GetMongoDB() != nil {
 		if err := database.CreateUserCredit(uc); err != nil {
-			return fmt.Errorf("failed to sync user credit to MongoDB: %w", err)
+			return fmt.Errorf("failed to save user credit to MongoDB: %w", err)
 		}
 	}
 
 	return nil
 }
 
+// GetUserCredit retrieves user credit by userId
 func (s *UserService) GetUserCredit(userId string) (*database.UserCredit, error) {
-	if s.ccService.IsMongoDBConnected() {
+	ctx := context.Background()
+
+	// Try MongoDB first (fast path)
+	if database.GetMongoDB() != nil {
 		uc, err := database.GetUserCredit(userId)
 		if err == nil {
 			return uc, nil
 		}
 	}
 
-	uc, err := s.ccService.GetUserCredit(userId)
+	// Fallback to event store - rebuild state from events
+	state, err := s.eventSvc.GetLatestState(ctx, eventstore.StreamUserCredit, userId)
 	if err != nil {
 		return nil, ErrUserNotFound
 	}
 
-	if s.ccService.IsMongoDBConnected() {
-		database.UpsertUserCredit(uc)
-	}
-
-	return uc, nil
-}
-
-func (s *UserService) GetAllUserCredits() ([]*database.UserCredit, error) {
-	if s.ccService.IsMongoDBConnected() {
-		userCredits, err := database.GetAllUserCredits()
-		if err == nil && len(userCredits) > 0 {
-			return userCredits, nil
-		}
-	}
-
-	userCredits, err := s.ccService.GetAllUserCredits()
+	// Convert interface{} to UserCredit
+	data, err := json.Marshal(state)
 	if err != nil {
-		return nil, fmt.Errorf("failed to get user credits: %w", err)
+		return nil, fmt.Errorf("failed to marshal state: %w", err)
 	}
 
-	if s.ccService.IsMongoDBConnected() {
-		for _, uc := range userCredits {
-			database.UpsertUserCredit(uc)
+	var uc database.UserCredit
+	if err := json.Unmarshal(data, &uc); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal user credit: %w", err)
+	}
+
+	return &uc, nil
+}
+
+// GetAllUserCredits retrieves all user credits
+func (s *UserService) GetAllUserCredits() ([]*database.UserCredit, error) {
+	ctx := context.Background()
+
+	// Try MongoDB first
+	if database.GetMongoDB() != nil {
+		ucs, err := database.GetAllUserCredits()
+		if err == nil && len(ucs) > 0 {
+			return ucs, nil
 		}
 	}
 
-	return userCredits, nil
+	// Fallback to event store - get all latest states
+	states, err := s.eventSvc.GetAllLatestStates(ctx, eventstore.StreamUserCredit)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get all user credits: %w", err)
+	}
+
+	results := make([]*database.UserCredit, 0, len(states))
+	for _, state := range states {
+		data, err := json.Marshal(state)
+		if err != nil {
+			continue
+		}
+		var uc database.UserCredit
+		if err := json.Unmarshal(data, &uc); err == nil {
+			results = append(results, &uc)
+		}
+	}
+
+	return results, nil
 }
 
+// UpdateUserCredit updates user credit
 func (s *UserService) UpdateUserCredit(userId string, uc *database.UserCredit) error {
 	uc.UserID = userId
+	ctx := context.Background()
 
-	if err := s.ccService.SaveUserCredit(uc); err != nil {
-		return fmt.Errorf("failed to update user credit in blockchain: %w", err)
+	// Emit event
+	err := s.eventSvc.AppendEvent(ctx, eventstore.StreamUserCredit, userId, eventstore.EventUserCreditUpdated, uc)
+	if err != nil {
+		return fmt.Errorf("failed to emit event: %w", err)
 	}
 
-	if s.ccService.IsMongoDBConnected() {
+	// Update in MongoDB
+	if database.GetMongoDB() != nil {
 		if err := database.UpdateUserCredit(userId, uc); err != nil {
-			return fmt.Errorf("failed to sync user credit to MongoDB: %w", err)
+			return fmt.Errorf("failed to update user credit in MongoDB: %w", err)
 		}
 	}
 
 	return nil
 }
 
+// DeleteUserCredit deletes user credit
 func (s *UserService) DeleteUserCredit(userId string) error {
-	if err := s.ccService.DeleteUserCredit(userId); err != nil {
-		return fmt.Errorf("failed to delete user credit from blockchain: %w", err)
+	ctx := context.Background()
+
+	// Emit deletion event
+	data := map[string]string{"userId": userId, "deleted": "true"}
+	err := s.eventSvc.AppendEvent(ctx, eventstore.StreamUserCredit, userId, eventstore.EventUserCreditUpdated, data)
+	if err != nil {
+		return fmt.Errorf("failed to emit delete event: %w", err)
 	}
 
-	if s.ccService.IsMongoDBConnected() {
+	// Delete from MongoDB
+	if database.GetMongoDB() != nil {
 		if err := database.DeleteUserCredit(userId); err != nil {
 			return fmt.Errorf("failed to delete user credit from MongoDB: %w", err)
 		}
-		if err := database.DeleteCreditHistoriesByUser(userId); err != nil {
-			return fmt.Errorf("failed to delete credit histories from MongoDB: %w", err)
-		}
 	}
 
 	return nil
 }
 
+// Recharge adds credit to user account
 func (s *UserService) Recharge(userId string, amount int, description string) (*database.UserCredit, error) {
 	if amount <= 0 {
 		return nil, errors.New("recharge amount must be positive")
 	}
 
+	ctx := context.Background()
+
+	// Get current state
 	uc, err := s.GetUserCredit(userId)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
+			// Create new user credit
 			uc = &database.UserCredit{
 				ID:            uuid.New().String(),
 				UserID:        userId,
@@ -134,6 +185,24 @@ func (s *UserService) Recharge(userId string, amount int, description string) (*
 		}
 	}
 
+	// Update credit
+	uc.Credit += amount
+	uc.TotalRecharge += amount
+
+	// Emit recharge event
+	eventData := map[string]interface{}{
+		"userId":        userId,
+		"credit":        uc.Credit,
+		"amount":        amount,
+		"totalRecharge": uc.TotalRecharge,
+		"description":   description,
+	}
+	err = s.eventSvc.AppendEvent(ctx, eventstore.StreamUserCredit, userId, eventstore.EventUserCreditRecharged, eventData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to emit recharge event: %w", err)
+	}
+
+	// Save history
 	history := &database.CreditHistory{
 		ID:          uuid.New().String(),
 		UserID:      userId,
@@ -141,19 +210,7 @@ func (s *UserService) Recharge(userId string, amount int, description string) (*
 		Type:        database.HistoryTypeRecharge,
 		Description: description,
 	}
-
-	if err := s.ccService.SaveCreditHistory(history); err != nil {
-		return nil, fmt.Errorf("failed to save recharge history: %w", err)
-	}
-
-	uc.Credit += amount
-	uc.TotalRecharge += amount
-
-	if err := s.ccService.SaveUserCredit(uc); err != nil {
-		return nil, fmt.Errorf("failed to update user credit: %w", err)
-	}
-
-	if s.ccService.IsMongoDBConnected() {
+	if database.GetMongoDB() != nil {
 		database.CreateCreditHistory(history)
 		database.UpsertUserCredit(uc)
 	}
@@ -161,10 +218,13 @@ func (s *UserService) Recharge(userId string, amount int, description string) (*
 	return uc, nil
 }
 
+// Consume deducts credit from user account
 func (s *UserService) Consume(userId string, amount int, novelId string, description string) (*database.UserCredit, error) {
 	if amount <= 0 {
 		return nil, errors.New("consume amount must be positive")
 	}
+
+	ctx := context.Background()
 
 	uc, err := s.GetUserCredit(userId)
 	if err != nil {
@@ -175,6 +235,25 @@ func (s *UserService) Consume(userId string, amount int, novelId string, descrip
 		return nil, ErrInsufficientCredit
 	}
 
+	// Update credit
+	uc.Credit -= amount
+	uc.TotalUsed += amount
+
+	// Emit consume event
+	eventData := map[string]interface{}{
+		"userId":     userId,
+		"credit":     uc.Credit,
+		"amount":     amount,
+		"totalUsed":  uc.TotalUsed,
+		"novelId":    novelId,
+		"description": description,
+	}
+	err = s.eventSvc.AppendEvent(ctx, eventstore.StreamUserCredit, userId, eventstore.EventUserCreditConsumed, eventData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to emit consume event: %w", err)
+	}
+
+	// Save history
 	history := &database.CreditHistory{
 		ID:          uuid.New().String(),
 		UserID:      userId,
@@ -183,19 +262,7 @@ func (s *UserService) Consume(userId string, amount int, novelId string, descrip
 		Description: description,
 		NovelID:     novelId,
 	}
-
-	if err := s.ccService.SaveCreditHistory(history); err != nil {
-		return nil, fmt.Errorf("failed to save consume history: %w", err)
-	}
-
-	uc.Credit -= amount
-	uc.TotalUsed += amount
-
-	if err := s.ccService.SaveUserCredit(uc); err != nil {
-		return nil, fmt.Errorf("failed to update user credit: %w", err)
-	}
-
-	if s.ccService.IsMongoDBConnected() {
+	if database.GetMongoDB() != nil {
 		database.CreateCreditHistory(history)
 		database.UpsertUserCredit(uc)
 	}
@@ -203,18 +270,14 @@ func (s *UserService) Consume(userId string, amount int, novelId string, descrip
 	return uc, nil
 }
 
+// GetCreditHistories retrieves credit histories for a user
 func (s *UserService) GetCreditHistories(userId string) ([]*database.CreditHistory, error) {
-	if s.ccService.IsMongoDBConnected() {
+	if database.GetMongoDB() != nil {
 		histories, err := database.GetCreditHistoriesByUser(userId)
 		if err == nil && len(histories) > 0 {
 			return histories, nil
 		}
 	}
 
-	histories, err := s.ccService.GetCreditHistoriesByUser(userId)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get credit histories: %w", err)
-	}
-
-	return histories, nil
+	return nil, fmt.Errorf("credit histories not found for user: %s", userId)
 }
