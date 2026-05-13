@@ -1,0 +1,40 @@
+version: "3.8"
+
+services:
+  novel-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    user: "${UID:-1000}:${GID:-1000}"
+    container_name: novel-api
+    restart: unless-stopped
+    environment:
+      - ADDR=8080
+    env_file: .env
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./security:/app/security:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    networks:
+      - novel-resource-management_novel-network
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "wget",
+          "--no-verbose",
+          "--tries=1",
+          "--spider",
+          "http://localhost:8080/health",
+        ]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+networks:
+  novel-resource-management_novel-network:
+    name: novel-resource-management_novel-network
+    driver: bridge
